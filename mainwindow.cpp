@@ -14,6 +14,7 @@
 #include<iostream>
 #include<cmath>
 #include<QPainter>
+#include<QTextEdit>>
 
 #include <windows.h>
 
@@ -438,8 +439,17 @@ void MainWindow::on_pushButton_clicked()
 
        qint64 start,end,duration1,duration2,duration3;
 
+       double d=7,sigmaC=50,sigmaS=50;
+
+       if(!(ui->textEdit->toPlainText().isEmpty()||ui->textEdit_2->toPlainText().isEmpty()||ui->textEdit_3->toPlainText().isEmpty()))
+       {
+           d=ui->textEdit->toPlainText().toDouble();
+           sigmaC=ui->textEdit_2->toPlainText().toDouble();
+           sigmaS=ui->textEdit_3->toPlainText().toDouble();
+       }
+
        start=getTimeStanp();
-       myBilateralFilter(toProcess,result1,7,50,50);
+       myBilateralFilter(toProcess,result1,d,sigmaC,sigmaS);
        end=getTimeStanp();
        duration1=end-start;
        QImage toShow=mat2qim(result1);
@@ -447,7 +457,7 @@ void MainWindow::on_pushButton_clicked()
        pix2.toSave=toShow;
 
        start=getTimeStanp();
-       myAdaptiveBilateralFilter(toProcess,result2,7,50,50);
+       myAdaptiveBilateralFilter(toProcess,result2,d,sigmaC,sigmaS);
        end=getTimeStanp();
        duration2=end-start;
        toShow=mat2qim(result2);
@@ -456,7 +466,7 @@ void MainWindow::on_pushButton_clicked()
 
 
        start=getTimeStanp();
-       cv::bilateralFilter(toProcess,result3,7,50,50);
+       cv::bilateralFilter(toProcess,result3,d,sigmaC,sigmaS);
        end=getTimeStanp();
        duration3=end-start;
        toShow=mat2qim(result3);
