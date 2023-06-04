@@ -6,17 +6,196 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 
-#include <QFileDialog>  //添加的头文件
-#include <QDebug>       //添加的头文件
+#include <QFileDialog>
+#include <QDebug>
 #include<QImage>
 #include<QWheelEvent>
 
 #include<iostream>
 #include<cmath>
 #include<QPainter>
-#include<QTextEdit>>
+#include<QTextEdit>
 
 #include <windows.h>
+#include <thread>
+
+
+void bilateralFilterThread(const std::vector<cv::Mat> &srcPlanes, std::vector<cv::Mat> &dstPlanes,
+                           const cv::Mat &spaceWeights, int startRow, int endRow, int channel, int d,
+                           double sigmaColor, double sigmaSpace)
+{
+    int halfSize = d / 2;
+    double color_coefficient = -0.5 / (sigmaColor * sigmaColor);
+
+    for (int ch = 0; ch < channel; ++ch) {
+        for (int i = startRow; i < endRow; ++i) {
+            for (int j = 0; j < srcPlanes[ch].cols; ++j) {
+                double totalWeight = 0.0;
+                double totalSum = 0.0;
+                for (int dx = -halfSize; dx <= halfSize; ++dx) {
+                    for (int dy = -halfSize; dy <= halfSize; ++dy) {
+                        int x = i + dx;
+                        int y = j + dy;
+                        if (x >= 0 && x < srcPlanes[ch].rows && y >= 0 && y < srcPlanes[ch].cols) {
+                            double colorDistance =
+                                static_cast<double>(srcPlanes[ch].at<uchar>(i, j) - srcPlanes[ch].at<uchar>(x, y));
+                            double colorWeight = std::exp(colorDistance * colorDistance * color_coefficient);
+                            double weight = spaceWeights.at<double>(dx + halfSize, dy + halfSize) * colorWeight;
+                            totalWeight += weight;
+                            totalSum += weight * static_cast<double>(srcPlanes[ch].at<uchar>(x, y));
+                        }
+                    }
+                }
+                if (totalWeight > 0) {
+                    dstPlanes[ch].at<uchar>(i, j) = cv::saturate_cast<uchar>(totalSum / totalWeight);
+                } else {
+                    dstPlanes[ch].at<uchar>(i, j) = srcPlanes[ch].at<uchar>(i, j);
+                }
+            }
+        }
+    }
+}
+
+void myBilateralFilterMultiThread(const cv::Mat &src, cv::Mat &dst, int d, double sigmaColor, double sigmaSpace, int num_threads)
+{
+    CV_Assert(src.depth() == CV_8U);
+    sigmaColor /= 2;
+    sigmaSpace /= 2;
+
+    int channel = src.channels();
+    int halfSize = d / 2;
+    double space_coefficient = -0.5 / (sigmaSpace * sigmaSpace);
+
+    dst.create(src.size(), src.type());
+
+    // Create space weight matrix
+    cv::Mat spaceWeights = cv::Mat(2 * halfSize + 1, 2 * halfSize + 1, CV_64F);
+    for (int i = -halfSize; i <= halfSize; ++i) {
+        for (int j = -halfSize; j <= halfSize; ++j) {
+            double value = std::sqrt(i * i + j * j);
+            spaceWeights.at<double>(i + halfSize, j + halfSize) = std::exp(value * value * space_coefficient);
+        }
+    }
+
+    // Apply filter
+    std::vector<cv::Mat> srcPlanes;
+    cv::split(src, srcPlanes);
+    std::vector<cv::Mat> dstPlanes(channel);
+
+    for (int ch = 0; ch < channel; ++ch) {
+        dstPlanes[ch].create(src.size(), CV_8UC1);
+    }
+
+    std::vector<std::thread> threads;
+
+    int rowsPerThread = src.rows / num_threads;
+    for (int i = 0; i < num_threads; ++i) {
+        int startRow = i * rowsPerThread;
+        int endRow = (i == num_threads - 1) ? src.rows : (i + 1) * rowsPerThread;
+        threads.push_back(std::thread(bilateralFilterThread, srcPlanes, std::ref(dstPlanes),
+                                      std::ref(spaceWeights), startRow, endRow, channel, d, sigmaColor, sigmaSpace));
+    }
+
+    for (std::thread &t : threads) {
+        t.join();
+    }
+
+    cv::merge(dstPlanes, dst);
+}
+
+
+void adaptiveBilateralFilterThread(const std::vector<cv::Mat> &srcPlanes, std::vector<cv::Mat> &dstPlanes,
+                                   const cv::Mat &spaceWeights, const cv::Mat &localVariance,
+                                   int startRow, int endRow, int channel, int d)
+{
+    int halfSize = d / 2;
+
+    for (int ch = 0; ch < channel; ++ch) {
+        for (int i = startRow; i < endRow; ++i) {
+            for (int j = 0; j < srcPlanes[ch].cols; ++j) {
+                double totalWeight = 0.0;
+                double totalSum = 0.0;
+                for (int dx = -halfSize; dx <= halfSize; ++dx) {
+                    for (int dy = -halfSize; dy <= halfSize; ++dy) {
+                        int x = i + dx;
+                        int y = j + dy;
+                        if (x >= 0 && x < srcPlanes[ch].rows && y >= 0 && y < srcPlanes[ch].cols) {
+                            double adjustedSigmaColor = localVariance.at<float>(x, y);
+                            double color_coefficient = -0.5 / (adjustedSigmaColor * adjustedSigmaColor);
+                            double colorDistance = static_cast<double>(srcPlanes[ch].at<uchar>(i, j) - srcPlanes[ch].at<uchar>(x, y));
+                            double colorWeight = std::exp(colorDistance * colorDistance * color_coefficient);
+                            double weight = spaceWeights.at<double>(dx + halfSize, dy + halfSize) * colorWeight;
+                            totalWeight += weight;
+                            totalSum += weight * static_cast<double>(srcPlanes[ch].at<uchar>(x, y));
+                        }
+                    }
+                }
+                if (totalWeight > 0) {
+                    dstPlanes[ch].at<uchar>(i, j) = cv::saturate_cast<uchar>(totalSum / totalWeight);
+                } else {
+                    dstPlanes[ch].at<uchar>(i, j) = srcPlanes[ch].at<uchar>(i, j);
+                }
+            }
+        }
+    }
+}
+
+void myAdaptiveBilateralFilterMultiThread(const cv::Mat &src, cv::Mat &dst, int d, int num_threads)
+{
+    CV_Assert(src.depth() == CV_8U);
+
+    double sigmaSpace=(src.cols+src.rows)/2;
+
+    int channel = src.channels();
+    int halfSize = d/2;
+    double space_coefficient = -0.5 / (sigmaSpace * sigmaSpace);
+
+    dst.create(src.size(), src.type());
+
+    // Create space weight matrix
+    cv::Mat spaceWeights = cv::Mat(2 * halfSize + 1, 2 * halfSize + 1, CV_64F);
+    for(int i = -halfSize; i <= halfSize; ++i) {
+        for(int j = -halfSize; j <= halfSize; ++j) {
+            double value = std::sqrt(i * i + j * j);
+            spaceWeights.at<double>(i + halfSize, j + halfSize) = std::exp(value * value * space_coefficient);
+        }
+    }
+
+    // Calculate local variance
+    cv::Mat localVariance;
+    cv::boxFilter(src, localVariance, CV_32F, cv::Size(d, d));
+    localVariance = localVariance.mul(localVariance) / (d * d);
+
+    // Apply filter
+    std::vector<cv::Mat> srcPlanes;
+    cv::split(src, srcPlanes);
+    std::vector<cv::Mat> dstPlanes(channel);
+
+    for (int ch = 0; ch < channel; ++ch) {
+        dstPlanes[ch].create(src.size(), CV_8UC1);  // Initialize destination planes
+    }
+
+    std::vector<std::thread> threads;
+
+    int rowsPerThread = src.rows / num_threads;
+    for (int i = 0; i < num_threads; ++i) {
+        int startRow = i * rowsPerThread;
+        int endRow = (i == num_threads - 1) ? src.rows : (i + 1) * rowsPerThread;
+        threads.push_back(std::thread(adaptiveBilateralFilterThread, srcPlanes, std::ref(dstPlanes),
+                                      std::ref(spaceWeights), std::ref(localVariance), startRow, endRow, channel, d));
+    }
+
+    for (std::thread &t : threads) {
+        t.join();
+    }
+
+    cv::merge(dstPlanes, dst);
+}
+
+
+
+
+
 
 
 double calculateSSIM(const QImage& image1, const QImage& image2) {
@@ -186,11 +365,11 @@ void myBilateralFilter(const cv::Mat &src, cv::Mat &dst, int d, double sigmaColo
 }
 
 
-void myAdaptiveBilateralFilter(const cv::Mat &src, cv::Mat &dst, int d, double sigmaColor, double sigmaSpace)
+void myAdaptiveBilateralFilter(const cv::Mat &src, cv::Mat &dst, int d)
 {
     CV_Assert(src.depth() == CV_8U);
-    sigmaColor/=2;
-    sigmaSpace/=2;
+
+    double sigmaSpace=(src.cols+src.rows)/2;
 
     int channel = src.channels();
     int halfSize = d/2;
@@ -232,7 +411,8 @@ void myAdaptiveBilateralFilter(const cv::Mat &src, cv::Mat &dst, int d, double s
                         int y = j + dy;
                         if(x >= 0 && x < src.rows && y >= 0 && y < src.cols) {
                             // Adjust sigmaColor based on local variance
-                            double adjustedSigmaColor = sigmaColor * (0.75 + pow(0.5,(localVariance.at<float>(x, y))));
+
+                            double adjustedSigmaColor=(localVariance.at<float>(x, y));
                             double color_coefficient = -0.5 / (adjustedSigmaColor * adjustedSigmaColor);
 
                             double colorDistance = static_cast<double>(srcPlanes[ch].at<uchar>(i, j) - srcPlanes[ch].at<uchar>(x, y));
@@ -449,7 +629,7 @@ void MainWindow::on_pushButton_clicked()
        }
 
        start=getTimeStanp();
-       myBilateralFilter(toProcess,result1,d,sigmaC,sigmaS);
+       myBilateralFilterMultiThread(toProcess,result1,d,sigmaC,sigmaS,16);
        end=getTimeStanp();
        duration1=end-start;
        QImage toShow=mat2qim(result1);
@@ -457,7 +637,7 @@ void MainWindow::on_pushButton_clicked()
        pix2.toSave=toShow;
 
        start=getTimeStanp();
-       myAdaptiveBilateralFilter(toProcess,result2,d,sigmaC,sigmaS);
+       myAdaptiveBilateralFilterMultiThread(toProcess,result2,d,16);
        end=getTimeStanp();
        duration2=end-start;
        toShow=mat2qim(result2);
